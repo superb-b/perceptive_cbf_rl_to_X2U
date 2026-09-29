@@ -34,6 +34,9 @@ wandb/
 outputs/
 output/
 
+MUJOCO_LOG.TXT
+*.log
+
 # Motion-retargeting scratch outputs (csv_to_npz.py)
 motion_data_npz/
 

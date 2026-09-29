@@ -270,6 +270,76 @@ def soft_landing(
       cost = cost * active
   return cost
 
+def stand_default_pose_l2(
+    env,
+    command_name: str,
+    asset_cfg,
+    lin_vel_threshold: float = 0.10,
+    ang_vel_threshold: float = 0.10,
+):
+  """Penalize deviation from the default joint pose only for standing commands."""
+
+  # [num_envs, 3] = vx, vy, yaw_rate
+  command = env.command_manager.get_command(command_name)
+
+  # Only enable this cost when commanded velocity is essentially zero.
+  is_standing = (
+      (torch.linalg.vector_norm(command[:, :2], dim=1) < lin_vel_threshold)
+      & (torch.abs(command[:, 2]) < ang_vel_threshold)
+  )
+
+  asset = env.scene[asset_cfg.name]
+
+  # Selected joint positions.
+  joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+
+  # Default pose corresponding to the same joints.
+  default_joint_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+
+  # Mean instead of sum, so the reward magnitude does not explode with 31 joints.
+  error = torch.mean(
+      torch.square(joint_pos - default_joint_pos),
+      dim=1,
+  )
+
+  return error * is_standing.float()
+
+def low_speed_arm_default_pose_l2(
+    env,
+    command_name: str,
+    asset_cfg,
+    speed_scale: float = 0.6,
+    yaw_scale: float = 0.3,
+):
+    """Penalize arm deviation from default pose mainly at low commanded speed."""
+
+    command = env.command_manager.get_command(command_name)
+
+    # Effective commanded speed.
+    speed_sq = (
+        command[:, 0].square()
+        + command[:, 1].square()
+        + (yaw_scale * command[:, 2]).square()
+    )
+
+    # Smooth gate:
+    # speed=0      -> gate=1
+    # small speed  -> gate gradually decreases
+    # high speed   -> gate≈0
+    gate = torch.exp(-speed_sq / (speed_scale**2))
+
+    asset = env.scene[asset_cfg.name]
+
+    joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+    default_joint_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+
+    error = torch.mean(
+        torch.square(joint_pos - default_joint_pos),
+        dim=1,
+    )
+
+    return gate * error
+
 def leap_flight_time(
   env: ManagerBasedRlEnv,
   sensor_name: str,
