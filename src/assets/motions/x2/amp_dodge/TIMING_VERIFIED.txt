@@ -1,0 +1,2 @@
+54 clips: WalkandRun=17, Dodge=7, Leap=30.
+Inspect playback before training. Set both AMP and RSI paths explicitly.

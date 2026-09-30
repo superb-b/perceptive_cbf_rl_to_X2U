@@ -52,7 +52,7 @@ def _apply_goto_overrides(cfg: ManagerBasedRlEnvCfg, play: bool) -> ManagerBased
     max_lin_vel_x=1.3,
     max_lin_vel_y=1.5,
     max_ang_vel_z=0.5,  # moot: simple_heading=False -> commanded yaw is 0.
-    arrive_radius=0.25,
+    arrive_radius=0.2,
     dwell_time_range=(1.0, 3.0),
     # Dodge-style: do NOT turn to face the goal. The robot leaps to the point in
     # whatever body-relative direction it lies (sideways / backward / diagonal) while
@@ -80,7 +80,7 @@ def _apply_goto_overrides(cfg: ManagerBasedRlEnvCfg, play: bool) -> ManagerBased
     weight=2.0,
     params={
       "command_name": "twist",
-      "threshold": 0.3,
+      "threshold": 0.2,
       "speed_threshold": 0.5,
       "asset_cfg": SceneEntityCfg("robot"),
     },
@@ -90,7 +90,7 @@ def _apply_goto_overrides(cfg: ManagerBasedRlEnvCfg, play: bool) -> ManagerBased
     weight=-0.5,
     params={
       "command_name": "twist",
-      "threshold": 0.5,
+      "threshold": 0.2,
       "asset_cfg": SceneEntityCfg("robot"),
     },
   )

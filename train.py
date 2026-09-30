@@ -84,26 +84,6 @@ def _load_module_partial(
     return None
 
   for new_key, new_tensor in new_state.items():
-    # Dodge actor: do NOT inherit the final action projection.
-    # Let the 31-DoF action combinations reorganize for dodge motions.
-    if (
-      tag == "actor"
-      and action_dim is not None
-      and (
-        # final Linear weight: [31, hidden]
-        (new_tensor.ndim == 2 and new_tensor.shape[0] == action_dim)
-        or
-        # final Linear bias: [31]
-        (new_tensor.ndim == 1 and new_tensor.shape[0] == action_dim
-         and new_key.endswith("bias"))
-      )
-    ):
-      print(
-        f"[TRANSFER:actor] reinitialize action head: "
-        f"{new_key} {tuple(new_tensor.shape)}"
-      )
-      continue
-    
     old_key = find_old_key(new_key)
 
     if old_key is None:

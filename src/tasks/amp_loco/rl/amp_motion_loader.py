@@ -13,6 +13,8 @@ the discriminator compares like-with-like.
 from __future__ import annotations
 
 import os
+import json
+from pathlib import Path
 from collections.abc import Sequence
 
 import numpy as np
@@ -20,6 +22,47 @@ import torch
 from tqdm import tqdm
 
 import mjlab.utils.lab_api.math as math_utils
+
+
+def _read_amp_sampling_manifest(manifest_file):
+  """Return clips and probabilities; group mass is independent of clip counts."""
+  manifest_path = Path(manifest_file).resolve()
+  spec = json.loads(manifest_path.read_text())
+  if spec.get("format") != "amp_group_sampling_v1":
+    raise ValueError("Unsupported AMP sampling manifest format")
+  groups = spec.get("groups", [])
+  if not groups:
+    raise ValueError("AMP sampling manifest has no groups")
+  files, names, probabilities, labels = [], [], [], []
+  seen_files, seen_labels = set(), set()
+  group_mass = []
+  for group in groups:
+    label = group["name"]
+    probability = float(group["probability"])
+    if label in seen_labels or not np.isfinite(probability) or probability <= 0:
+      raise ValueError("Group names must be unique and probabilities positive/finite")
+    seen_labels.add(label)
+    directory = (manifest_path.parent / group["directory"]).resolve()
+    paths = []
+    for root, _, entries in os.walk(directory):
+      paths.extend(os.path.join(root, name) for name in entries if name.endswith(".npz"))
+    paths.sort()
+    if not paths:
+      raise ValueError(f"No NPZ files in AMP group {label}: {directory}")
+    for path in paths:
+      canonical = str(Path(path).resolve())
+      if canonical in seen_files:
+        raise ValueError(f"Duplicate clip in AMP manifest: {canonical}")
+      seen_files.add(canonical)
+      files.append(path)
+      names.append(Path(path).stem)
+      probabilities.append(probability / len(paths))
+      labels.append(label)
+    group_mass.append(probability)
+    print(f"[AMP MIX] {label}: probability={probability:.3f}, clips={len(paths)}")
+  if not np.isclose(sum(group_mass), 1.0, rtol=0.0, atol=1e-8):
+    raise ValueError("AMP group probabilities must sum to 1")
+  return files, names, probabilities, labels
 
 
 class AMPLoader:
@@ -48,7 +91,13 @@ class AMPLoader:
     self._anchor_indexes = all_names.index(anchor_name)
     self._num_bodies = len(self._body_indexes)
 
-    if os.path.isfile(motion_file):
+    # Opt-in manifest mode; existing NPZ/directory tasks keep their old behavior.
+    self._amp_sampling_probabilities = None
+    self._amp_group_labels = None
+    if os.path.isfile(motion_file) and str(motion_file).endswith(".json"):
+      (motion_files, motion_names, self._amp_sampling_probabilities,
+       self._amp_group_labels) = _read_amp_sampling_manifest(motion_file)
+    elif os.path.isfile(motion_file):
       motion_files = [motion_file]
       motion_names = [os.path.splitext(os.path.basename(motion_file))[0]]
     elif os.path.isdir(motion_file):
@@ -151,12 +200,17 @@ class AMPLoader:
 
     self.time_step_total = self._body_pos_b_list[0].shape[0]
     self.motion_total_time = self.time_step_total / self.fps
+    if self._amp_sampling_probabilities is not None:
+      self._prepare_weighted_sampling()
 
   @property
   def observation_dim(self) -> int:
     return (3 + 6 + 3 + 3) * self._num_bodies
 
   def feed_forward_generator(self, num_mini_batch: int, mini_batch_size: int):
+    if self._amp_sampling_probabilities is not None:
+      yield from self._weighted_feed_forward_generator(num_mini_batch, mini_batch_size)
+      return
     num_motions = len(self._body_pos_b_list)
     for batch_idx in range(num_mini_batch):
       motion_idx = batch_idx % num_motions
@@ -181,3 +235,59 @@ class AMPLoader:
         )
 
       yield _flatten(pos, ori, lin, ang, idx), _flatten(pos, ori, lin, ang, next_idx)
+
+  def _prepare_weighted_sampling(self):
+    """Flatten once for efficient vectorized, per-pair sampling on the GPU."""
+    lengths = [x.shape[0] for x in self._body_pos_b_list]
+    if any(n < 2 for n in lengths):
+      raise ValueError("AMP mixture requires at least two frames in every clip")
+    device = self._body_pos_b_list[0].device
+    frames = []
+    for i, n in enumerate(lengths):
+      frames.append(torch.cat([
+        self._body_pos_b_list[i].reshape(n, -1),
+        self._body_ori_b_list[i].reshape(n, -1),
+        self._body_lin_vel_b_list[i].reshape(n, -1),
+        self._body_ang_vel_b_list[i].reshape(n, -1),
+      ], dim=-1))
+    self._amp_flat_frames = torch.cat(frames, dim=0)
+    lengths_t = torch.tensor(lengths, dtype=torch.long, device=device)
+    self._amp_pair_counts = lengths_t - 1
+    self._amp_offsets = torch.cumsum(lengths_t, dim=0) - lengths_t
+    self._amp_clip_probs = torch.tensor(
+      self._amp_sampling_probabilities, dtype=torch.float32, device=device
+    )
+    self._amp_clip_probs /= self._amp_clip_probs.sum()
+    self._amp_sample_counts = torch.zeros(len(lengths), dtype=torch.long, device=device)
+    self._amp_group_indices = {
+      label: torch.tensor([i for i, x in enumerate(self._amp_group_labels) if x == label],
+                          dtype=torch.long, device=device)
+      for label in dict.fromkeys(self._amp_group_labels)
+    }
+    self._amp_generator_calls = 0
+
+  def _weighted_feed_forward_generator(self, num_mini_batch, mini_batch_size):
+    """Group probability -> uniform clip -> uniform valid adjacent frame pair.
+
+    70/30 is a probability per expert pair, not a promised exact split in each
+    finite batch. All clips remain eligible even if num_mini_batch is small.
+    Terminal frames are not sampled as self-transitions or across clip edges.
+    """
+    self._amp_generator_calls += 1
+    device = self._amp_flat_frames.device
+    for batch_idx in range(num_mini_batch):
+      clip_ids = torch.multinomial(self._amp_clip_probs, mini_batch_size, replacement=True)
+      counts = self._amp_pair_counts[clip_ids]
+      local_idx = (torch.rand(mini_batch_size, device=device) * counts).long()
+      local_idx = torch.minimum(local_idx, counts - 1)
+      idx = self._amp_offsets[clip_ids] + local_idx
+      self._amp_sample_counts += torch.bincount(clip_ids, minlength=len(self.motion_names))
+      if batch_idx == 0 and (self._amp_generator_calls == 1 or self._amp_generator_calls % 200 == 0):
+        total = int(self._amp_sample_counts.sum().item())
+        report = ", ".join(
+          f"{name}={self._amp_sample_counts[ids].sum().item() / max(total, 1):.3%}"
+          for name, ids in self._amp_group_indices.items()
+        )
+        covered = int((self._amp_sample_counts > 0).sum().item())
+        print(f"[AMP MIX SAMPLE] {report}; clips_seen={covered}/{len(self.motion_names)}; pairs={total}")
+      yield self._amp_flat_frames[idx], self._amp_flat_frames[idx + 1]

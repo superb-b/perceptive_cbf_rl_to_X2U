@@ -1,0 +1,112 @@
+"""X2 skill stage: goal-directed short leaps without a ball.
+
+Uses the supplied G1 GoTo reward recipe and the existing X2 flat robot config.
+Shared MDP, X2 action/joint ordering, proprio/AMP observations, and fall limits
+are unchanged. This trains directed travel and settling, not commanded ducking
+or exact reference-clip tracking. Inspect retargeted motions and fall events.
+"""
+
+from pathlib import Path
+
+from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+import src.tasks.amp_loco.mdp as mdp
+from src.tasks.amp_loco.mdp.goal_command import GoToGoalCommandCfg
+from .env_cfgs import x2_amp_flat_env_cfg
+
+X2_SKILL_MOTION_DIR = str(
+    Path(__file__).resolve().parents[4] / "assets/motions/x2/amp_dodge/Leap"
+)
+
+
+def x2_amp_leap_goto_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    cfg = x2_amp_flat_env_cfg(play=play)
+    if "ball" in cfg.scene.entities:
+        raise ValueError("Skill task must start from the X2 locomotion base, without a ball.")
+    for name in ("init_motion_loader", "reset_from_motion"):
+        cfg.events[name].params["motion_dir"] = X2_SKILL_MOTION_DIR
+    cfg.events["init_motion_loader"].params["recovery_dir"] = None
+
+    # Isolate the skill from externally imposed pushes in this first stage.
+    cfg.events.pop("push_robot", None)
+    # Keep a finite evaluation window instead of the base play config's 1e9 s.
+    cfg.episode_length_s = 20.0
+
+    cfg.commands["twist"] = GoToGoalCommandCfg(
+        entity_name="robot",
+        resampling_time_range=(6.0, 10.0),
+        radius=(0.5, 1.0),
+        rel_standing_envs=0.0 if play else 0.1,
+        rel_inplace_throw_envs=0.0,
+        kp=1.5,
+        kp_yaw=1.0,
+        max_lin_vel_x=1.3,
+        max_lin_vel_y=1.5,
+        max_ang_vel_z=0.5,
+        arrive_radius=0.15,
+        dwell_time_range=(1.0, 3.0),
+        simple_heading=False,
+        debug_vis=True,
+    )
+    # UniformVelocityCommand curricula are incompatible with GoToGoalCommand.
+    # Use only the existing goal-radius curriculum. The radius is shorter than
+    # G1's final 2 m to begin with local side/back steps rather than long travel.
+    cfg.curriculum = {}
+    if not play:
+        cfg.curriculum["goal_radius"] = CurriculumTermCfg(
+            func=mdp.goal_radius_curriculum,
+            params={
+                "command_name": "twist",
+                "start_radius": 0.2,
+                "final_radius": 1.0,
+                "steps_to_full": 24_000.0,
+            },
+        )
+
+    # Existing tracking and physical regularizers stay inherited from X2.
+    # No dodge-only command state may leak into this ball-free task.
+    linear = cfg.rewards.get("track_anchor_linear_velocity")
+    if linear is not None:
+        linear.params["track_dodge_safe"] = False
+        linear.params["mask_inplace"] = False
+
+    cfg.rewards["goal_distance"] = RewardTermCfg(
+        func=mdp.goal_distance_reward, weight=1.0,
+        params={"command_name": "twist", "std": 1.5},
+    )
+    cfg.rewards["goal_progress"] = RewardTermCfg(
+        func=mdp.goal_progress_reward, weight=0.5,
+        params={"command_name": "twist", "clip": 2.0},
+    )
+    cfg.rewards["goal_reached"] = RewardTermCfg(
+        func=mdp.goal_reached_bonus, weight=2.0,
+        params={
+            "command_name": "twist", "threshold": 0.15,
+            "speed_threshold": 0.5, "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["stop_at_goal"] = RewardTermCfg(
+        func=mdp.stop_at_goal_cost, weight=-0.5,
+        params={
+            "command_name": "twist", "threshold": 0.15,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    cfg.rewards["leap_flight"] = RewardTermCfg(
+        func=mdp.leap_flight_time, weight=2.0,
+        params={
+            "sensor_name": "feet_ground_contact", "command_name": "twist",
+            "min_flight_s": 0.05, "command_threshold": 0.1,
+        },
+    )
+    # Both feet must be separately resolved at runtime for leap_flight_time.
+    feet = [s for s in cfg.scene.sensors or () if s.name == "feet_ground_contact"]
+    if len(feet) != 1 or not feet[0].track_air_time:
+        raise ValueError("Expected one feet_ground_contact sensor with track_air_time=True.")
+    print(f"[X2 SKILL] RSI motion_dir = {X2_SKILL_MOTION_DIR}")
+    print("[X2 SKILL] no ball; heading fixed; goal travel + flight + settle")
+    print("[X2 SKILL] bad_base_height:", cfg.terminations["bad_base_height"].params)
+    return cfg

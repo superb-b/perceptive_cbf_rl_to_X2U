@@ -1,0 +1,15 @@
+{
+  "format": "amp_group_sampling_v1",
+  "groups": [
+    {
+      "name": "WalkandRun",
+      "directory": "amp_dodge/WalkandRun",
+      "probability": 0.7
+    },
+    {
+      "name": "Leap",
+      "directory": "amp_dodge/Leap",
+      "probability": 0.3
+    }
+  ]
+}

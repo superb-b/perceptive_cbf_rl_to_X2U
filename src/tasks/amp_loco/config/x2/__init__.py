@@ -43,3 +43,34 @@ register_mjlab_task(
     runner_cls=AMPOnPolicyRunner,
 )
 
+
+# BEGIN X2 LEAP GOTO SKILL TASK
+from .skill_env_cfgs import x2_amp_leap_goto_flat_env_cfg
+from .skill_rl_cfg import (
+    X2SkillOnPolicyRunner,
+    x2_amp_leap_goto_ppo_runner_cfg,
+)
+from mjlab.tasks.registry import register_mjlab_task as _register_x2_skill_task
+
+_register_x2_skill_task(
+    task_id="X2-AMP-Leap-GoTo-Flat",
+    env_cfg=x2_amp_leap_goto_flat_env_cfg(),
+    play_env_cfg=x2_amp_leap_goto_flat_env_cfg(play=True),
+    rl_cfg=x2_amp_leap_goto_ppo_runner_cfg(),
+    runner_cls=X2SkillOnPolicyRunner,
+)
+# END X2 LEAP GOTO SKILL TASK
+
+# BEGIN X2 TAKEOFF TASK
+from .takeoff_cfgs import x2_amp_takeoff_env_cfg, x2_amp_takeoff_rl_cfg
+from .skill_rl_cfg import X2SkillOnPolicyRunner as _X2TakeoffRunner
+from mjlab.tasks.registry import register_mjlab_task as _register_x2_takeoff
+
+_register_x2_takeoff(
+    task_id="X2-AMP-Takeoff-Flat",
+    env_cfg=x2_amp_takeoff_env_cfg(),
+    play_env_cfg=x2_amp_takeoff_env_cfg(play=True),
+    rl_cfg=x2_amp_takeoff_rl_cfg(),
+    runner_cls=_X2TakeoffRunner,
+)
+# END X2 TAKEOFF TASK
